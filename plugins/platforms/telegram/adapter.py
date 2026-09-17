@@ -5659,7 +5659,18 @@ class TelegramAdapter(BasePlatformAdapter):
     async def _build_triggered_event(self, msg, update, msg_type: MessageType) -> MessageEvent:
         """Event for an addressed text/command: trigger text cleaned, replied-to media cached, attribution applied."""
         event = self._build_message_event(msg, msg_type, update_id=update.update_id)
+        # _clean_bot_trigger_text removes the Telegram @handle before the model sees the turn.
+        # Preserve the routing fact explicitly: multi-bot profiles must still know this message
+        # was addressed to them, otherwise a SOUL.md rule such as "only act when mentioned"
+        # incorrectly turns a valid request into [SILENT].
+        trigger_facts = []
+        if self._message_mentions_bot(msg):
+            trigger_facts.append(f"[Telegram routing: the user explicitly mentioned @{self._current_bot_username()}]")
+        if self._is_reply_to_bot(msg):
+            trigger_facts.append("[Telegram routing: the user is replying to this bot's message]")
         event.text = self._clean_bot_trigger_text(event.text)
+        if trigger_facts:
+            event.text = "\n".join(trigger_facts) + "\n\n" + event.text
         await self._cache_replied_media(msg, event)
         return self._apply_telegram_group_observe_attribution(event)
 

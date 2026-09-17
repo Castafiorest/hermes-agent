@@ -7084,6 +7084,22 @@ class TestSupportsReasoningExtraBody:
             agent.model = model
             assert agent._supports_reasoning_extra_body() is True, model
 
+    def test_custom_provider_uses_declared_model_reasoning_capability(self):
+        agent = self._make_agent()
+        agent.provider = "custom:9router"
+        agent.base_url = "http://localhost:20128/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "cx/gpt-5.6-luna"
+        agent._custom_providers = [
+            {
+                "name": "9router",
+                "base_url": agent.base_url,
+                "models": {agent.model: {"supports_reasoning": True}},
+            }
+        ]
+
+        assert agent._supports_reasoning_extra_body() is True
+
 
 class TestMemoryContextSanitization:
     """sanitize_context() helper correctness — used at provider boundaries."""

@@ -278,6 +278,9 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         self._text_batch_split_delay_seconds = self._coerce_float_extra("text_batch_split_delay_seconds", 10.0)
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
+        # Native WhatsApp polls carry no callback payload; map their message ID
+        # to the selection callback until the bridge forwards a vote.
+        self._model_picker_state: Dict[str, Dict[str, Any]] = {}
 
     def _coerce_float_extra(self, key: str, default: float) -> float:
         """Read a float from ``config.extra``; NaN/Inf/negative/unparseable → ``default`` (fed to asyncio.sleep)."""
@@ -608,6 +611,75 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         payload: Dict[str, Any] = {"chatId": to_whatsapp_jid(chat_id), "question": question, "options": list(options or []), "selectableCount": selectable_count}
         return await self._post_bridge_message("send-poll", payload, timeout=30)
 
+    async def send_model_picker(self, chat_id: str, providers: list, current_model: str, current_provider: str,
+                                session_key: str, on_model_selected, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+        """Show /model as a native WhatsApp poll; votes use the normal gateway switch callback."""
+        choices = [(str(model).strip(), str(provider.get("slug") or "").strip())
+                   for provider in providers for model in (provider.get("models") or []) if str(model).strip()]
+        if not choices:
+            return SendResult(success=False, error="No models available")
+
+        async def send_page(page: int) -> SendResult:
+            # Reserve two of WhatsApp's 12 slots for Previous/Next navigation.
+            page_size = 10
+            start = page * page_size
+            page_choices = choices[start:start + page_size]
+            labels = [f"{'✓ ' if model == current_model else ''}{model}" for model, _ in page_choices]
+            mapping = dict(zip(labels, page_choices))
+            if start + page_size < len(choices):
+                labels.append("Next models →"); mapping["Next models →"] = None
+            if page:
+                labels.append("← Previous models"); mapping["← Previous models"] = None
+            result = await self.send_poll(chat_id, f"Choose model ({start + 1}-{min(start + 11, len(choices))} of {len(choices)})", labels, selectable_count=1)
+            if result.success and result.message_id:
+                self._model_picker_state[str(result.message_id)] = {"choices": mapping, "page": page, "send_page": send_page, "on_model_selected": on_model_selected}
+            return result
+        return await send_page(0)
+
+    async def _consume_model_picker_vote(self, chat_id: str, native: Dict[str, Any]) -> bool:
+        vote = native.get("pollUpdate") if isinstance(native, dict) else None
+        if not isinstance(vote, dict): return False
+        poll_id, options = str(vote.get("pollId") or ""), vote.get("selectedOptions") or []
+        if not poll_id or len(options) != 1 or poll_id not in self._model_picker_state: return False
+        state, label = self._model_picker_state[poll_id], str(options[0])
+        choice = state["choices"].get(label, "__missing__")
+        if choice == "__missing__": return False
+        self._model_picker_state.pop(poll_id, None)
+        if choice is None:
+            result = await state["send_page"](max(0, state["page"] + (1 if label == "Next models →" else -1)))
+            if not result.success: await self.send(chat_id, f"❌ Could not show more models: {result.error or 'unknown error'}")
+            return True
+        model_id, provider_slug = choice
+        try: confirmation = await state["on_model_selected"](chat_id, model_id, provider_slug)
+        except Exception as exc: confirmation = f"❌ Model switch failed: {exc}"
+        await self.send(chat_id, confirmation or f"✓ Switched to {model_id}")
+        return True
+
+    async def send_exec_approval(self, chat_id: str, command: str, session_key: str, description: str = "dangerous command",
+                                 metadata: Optional[Dict[str, Any]] = None, allow_permanent: bool = True,
+                                 allow_session: bool = True, smart_denied: bool = False) -> SendResult:
+        """Render dangerous-command approval as a native single-select WhatsApp poll.
+
+        Poll choices are literal gateway commands so the selected option re-enters the
+        normal approval router without adding a second approval state machine here.
+        """
+        options = ["/approve"]
+        if allow_session:
+            options.append("/approve session")
+        if allow_permanent:
+            options.append("/approve always")
+        options.append("/deny")
+        from gateway.run import _format_exec_approval_fallback, _redact_approval_command
+        body = _format_exec_approval_fallback(
+            _redact_approval_command(command), description, "/",
+            allow_permanent=allow_permanent, allow_session=allow_session, smart_denied=smart_denied,
+        )
+        result = await self.send_poll(chat_id, body, options, selectable_count=1)
+        if not result.success:
+            logger.warning("[%s] Native WhatsApp approval poll failed; falling back to text: %s", self.name, result.error)
+            return await self.send(chat_id, body, metadata=metadata)
+        return result
+
     async def send_clarify(self, chat_id: str, question: str, choices: Optional[list], clarify_id: str, session_key: str,
                            metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """Multiple-choice clarify as a native poll (the pick arrives as message text for the normal intercept); else text prompt."""
@@ -814,6 +886,8 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 metadata["whatsapp_from_owner"] = True
                 if not body.startswith(_OWNER_REPLY_PREFIX):
                     body = f"{_OWNER_REPLY_PREFIX}{body}"
+            if await self._consume_model_picker_vote(source.chat_id, native_metadata if isinstance(native_metadata, dict) else {}):
+                return None
             return MessageEvent(
                 text=body, message_type=msg_type, source=source, raw_message=data, message_id=data.get("messageId"),
                 media_urls=cached_urls, media_types=media_types, metadata=metadata,

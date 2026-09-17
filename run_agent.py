@@ -632,9 +632,13 @@ class AIAgent(
     def _provider_model_requires_responses_api(model: str, *, provider: Optional[str] = None) -> bool:
         """Return True when this provider/model pair should use Responses API."""
         normalized_provider = (provider or "").strip().lower()
-        # Nous serves GPT-5.x via chat completions (its /v1/responses returns 404); generic custom endpoints
-        # may relay GPT-5 without full Responses semantics — only direct OpenAI/xAI URLs auto-upgrade.
-        if normalized_provider in ("nous", "custom"):
+        # Nous and named custom endpoints serve GPT-5.x through their configured OpenAI-compatible
+        # route unless the caller explicitly selects ``api_mode: codex_responses``. A generic custom
+        # endpoint cannot be assumed to implement OpenAI's Responses surface merely because its model
+        # id starts with ``gpt-5`` (or is a GPT-5-compatible alias such as ``cx/gpt-5.6-luna``).
+        if normalized_provider == "custom" or normalized_provider.startswith("custom:"):
+            return False
+        if normalized_provider == "nous" or normalized_provider in {"nous-portal", "nousresearch"}:
             return False
         if normalized_provider == "copilot":
             try:

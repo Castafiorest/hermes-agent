@@ -49,8 +49,28 @@ class ReasoningParamsMixin:
 
     def _supports_reasoning_extra_body(self) -> bool:
         """True when reasoning extra_body is safe to send: OpenRouter forwards unknown extra_body upstream and
-        some routes 400 on ``reasoning``, so gate to known reasoning-capable families and direct Nous Portal."""
+        some routes 400 on ``reasoning``, so gate to known reasoning-capable families and direct Nous Portal.
+
+        Named custom providers may declare this capability per model because their endpoint identity is not
+        enough to infer the wire contract (for example, a local OpenAI-compatible router).
+        """
         url = self._base_url_lower
+        provider = str(getattr(self, "provider", "") or "").strip().lower()
+        if provider == "custom" or provider.startswith("custom:"):
+            try:
+                from hermes_cli.config import get_custom_provider_model_capability
+
+                declared = get_custom_provider_model_capability(
+                    model=self.model,
+                    base_url=getattr(self, "base_url", "") or "",
+                    capability="supports_reasoning",
+                    custom_providers=getattr(self, "_custom_providers", None),
+                )
+                if declared is not None:
+                    return declared
+            except Exception:
+                # A malformed or unavailable custom capability declaration must fail closed.
+                pass
         if base_url_host_matches(url, "nousresearch.com") or base_url_host_matches(url, "ai-gateway.vercel.sh"):
             return True
         if base_url_host_matches(url, "models.github.ai") or base_url_host_matches(url, "githubcopilot.com"):
