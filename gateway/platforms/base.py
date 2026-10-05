@@ -1342,7 +1342,15 @@ def _mask_media_scan_text(text: str) -> str:
 def _extensionless_media_matches(masked: str):
     """Yield ``(match, safe_path, end_offset)`` for every extension-less / unknown-extension
     MEDIA tag in ``masked`` that ``validate_media_delivery_path`` accepts."""
+    # A known-extension MEDIA path may contain spaces. The extensionless regex
+    # intentionally stops at whitespace, so it can also see the first token as
+    # a separate candidate (for example ``D:\\-`` in a path beginning with
+    # ``D:\\- Archive\\...\\file.pdf``). If that prefix is itself an existing
+    # file, it would otherwise be sent as a bogus second attachment.
+    known_spans = [m.span() for m in MEDIA_TAG_CLEANUP_RE.finditer(masked)]
     for match in MEDIA_EXTENSIONLESS_TAG_RE.finditer(masked):
+        if any(start <= match.start() < end for start, end in known_spans):
+            continue
         path = _normalize_media_tag_path(match.group("path"))
         if path and _path_lacks_deliverable_extension(path):
             resolved = _match_extensionless_path(masked, match)

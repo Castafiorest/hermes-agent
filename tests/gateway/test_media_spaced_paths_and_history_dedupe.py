@@ -33,6 +33,32 @@ class TestGisExtensions:
 class TestSpacedPaths:
 
 
+    def test_known_extension_path_does_not_emit_existing_prefix(self, tmp_path, monkeypatch):
+        """A spaced path must not also send its first token.
+
+        If the first token happens to be an existing file, the extensionless
+        fallback must not turn it into a second attachment.
+        """
+        import gateway.platforms.base as base
+
+        prefix = tmp_path / "-"
+        prefix.write_text("prefix sentinel\n")
+        target = tmp_path / "- Archive" / "tarikan packing list agent" / "Packing List RL-849.pdf"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"%PDF-1.4\n")
+
+        allowed = {os.path.normcase(str(prefix)), os.path.normcase(str(target))}
+
+        def fake_validate(path, *args, **kwargs):
+            return path if os.path.normcase(str(path)) in allowed else None
+
+        monkeypatch.setattr(base, "validate_media_delivery_path", fake_validate)
+        media, cleaned = BasePlatformAdapter.extract_media(f"MEDIA:{target}")
+
+        assert [os.path.normcase(path) for path, _ in media] == [os.path.normcase(str(target))]
+        assert cleaned == ""
+
+
     def test_spaced_path_followed_by_prose_keeps_prose(self, tmp_path):
         p = tmp_path / "my server.log"
         p.write_text("log line\n")
